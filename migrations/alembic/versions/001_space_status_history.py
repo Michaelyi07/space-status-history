@@ -42,7 +42,7 @@ def upgrade() -> None:
     )
     op.create_index(
         "ix_ssh_object_time", "space_status_history",
-        ["object_id", "occurred_at", "id"],
+        [sa.text("object_id"), sa.text("occurred_at DESC"), sa.text("id DESC")],
         postgresql_using="btree",
     )
     op.execute(
