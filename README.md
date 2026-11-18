@@ -10,7 +10,8 @@ Python 3.11+ / FastAPI / SQLAlchemy 2 / Alembic-style migration / PostgreSQL 16.
 |---|---|
 | `app/models.py` | `space_status_history` (all unified convention columns), `space_workstation` / `space_lease` stubs |
 | `app/writer.py` | `record_status_change`, `create_lease`, `terminate_lease`, `set_status` — all append in the caller's transaction |
-| `app/api.py` | `GET /api/space/workstations/{id}/history` (read-only route) |
+| `app/auth.py` | Tenant-scoped caller context from trusted headers (no cross-tenant IDOR) |
+| `app/api.py` | `GET /api/space/workstations/{id}/history` (read-only route, tenant-scoped) |
 | `app/db.py` | engine/session factory (`DATABASE_URL` env), DB immutability-trigger installer |
 | `app/schemas.py` | response models |
 | `alembic.ini` + `migrations/alembic/` | Real Alembic revision `20261118_ssh_001` (upgrade/downgrade), env-only URL |
@@ -24,6 +25,7 @@ Python 3.11+ / FastAPI / SQLAlchemy 2 / Alembic-style migration / PostgreSQL 16.
 2. **Write logic** — `record_status_change()` does NOT commit; the caller commits the business row and the history row together. A failed transaction rolls back both (test: `test_failed_transaction_rolls_back_state_and_history`).
 3. **Query** — `ORDER BY occurred_at DESC, id DESC`: deterministic tiebreak makes paging stable for same-timestamp changes. No history → HTTP 200 with `{"items": [], "total": 0}` (not 404).
 4. **Immutability** — two layers: no update/delete API route exists; a PG `BEFORE UPDATE OR DELETE` trigger raises on any write attempt. ORM updates and raw DELETE both rejected (tests). Corrections are new compensating rows, preserving the audit trail.
+5. **Tenant isolation (security)** — the query endpoint requires `X-Org-Id` / `X-Site-Id` headers from the trusted gateway/IAM (S2-IAM integration point in `app/auth.py`) and scopes both the workstation lookup and history rows by tenant. Cross-tenant workstation → 404 (indistinguishable from missing); missing/invalid headers → 400. Closes the cross-tenant IDOR path. A wrong entry cannot be read across tenants.
 
 ## Integration points (dependency stubs)
 
@@ -62,19 +64,21 @@ Environment: Windows x64; Python 3.13.14; PostgreSQL **16.9** (Visual C++ build 
 
 ```
 $ DATABASE_URL=postgresql+psycopg://postgres:postgres@127.0.0.1:5433/space_history_test python -m pytest tests -v
-tests/test_api.py::test_empty_history_returns_200_empty_list PASSED      [  9%]
-tests/test_api.py::test_history_query_newest_first_with_paging PASSED    [ 18%]
-tests/test_api.py::test_history_scoped_to_one_workstation PASSED         [ 27%]
-tests/test_criteria.py::test_lease_creation_and_termination_both_recorded PASSED [ 36%]
-tests/test_criteria.py::test_maintenance_and_manual_adjustment_recorded PASSED [ 45%]
-tests/test_criteria.py::test_failed_transaction_rolls_back_state_and_history PASSED [ 54%]
-tests/test_criteria.py::test_query_reverse_chronological PASSED          [ 63%]
-tests/test_criteria.py::test_same_timestamp_tiebreak_is_deterministic PASSED [ 72%]
-tests/test_criteria.py::test_immutable_orm_update_rejected PASSED        [ 81%]
-tests/test_criteria.py::test_immutable_raw_delete_rejected PASSED        [ 90%]
+tests/test_api.py::test_empty_history_returns_200_empty_list PASSED      [  7%]
+tests/test_api.py::test_history_query_newest_first_with_paging PASSED    [ 15%]
+tests/test_api.py::test_history_scoped_to_one_workstation PASSED         [ 23%]
+tests/test_api.py::test_cross_tenant_query_rejected PASSED               [ 30%]
+tests/test_api.py::test_missing_tenant_headers_rejected PASSED           [ 38%]
+tests/test_criteria.py::test_lease_creation_and_termination_both_recorded PASSED [ 46%]
+tests/test_criteria.py::test_maintenance_and_manual_adjustment_recorded PASSED [ 53%]
+tests/test_criteria.py::test_failed_transaction_rolls_back_state_and_history PASSED [ 61%]
+tests/test_criteria.py::test_query_reverse_chronological PASSED          [ 69%]
+tests/test_criteria.py::test_same_timestamp_tiebreak_is_deterministic PASSED [ 76%]
+tests/test_criteria.py::test_immutable_orm_update_rejected PASSED        [ 84%]
+tests/test_criteria.py::test_immutable_raw_delete_rejected PASSED        [ 92%]
 tests/test_criteria.py::test_compensating_row_is_the_correction_model PASSED [100%]
 
-======================== 11 passed, 1 warning in 2.70s ========================
+======================== 13 passed, 1 warning in 2.39s ========================
 ```
 
 DB-level trigger verification (psql, same PG16 instance):
